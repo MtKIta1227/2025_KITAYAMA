@@ -1,8 +1,16 @@
 import sys
 import numpy as np
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTextEdit,
-    QDoubleSpinBox, QCheckBox
+    QApplication,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QLabel,
+    QTextEdit,
+    QDoubleSpinBox,
+    QCheckBox,
+    QComboBox,
 )
 from PyQt5.QtCore import QTimer
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -72,6 +80,35 @@ class SimpleUSB4000GUI(QWidget):
         yrange_h.addWidget(QLabel("最大:"))
         yrange_h.addWidget(self.ymax_box)
 
+        # --- Trigger mode controls ---
+        try:
+            from seabreeze.pyseabreeze.devices import TriggerMode
+            self.trigger_modes = {
+                "NORMAL": TriggerMode.NORMAL,
+                "SOFTWARE": TriggerMode.SOFTWARE,
+                "SYNCHRONIZATION": TriggerMode.SYNCHRONIZATION,
+                "HARDWARE": TriggerMode.HARDWARE,
+            }
+        except Exception:
+            self.trigger_modes = {
+                "NORMAL": 0,
+                "SOFTWARE": 1,
+                "SYNCHRONIZATION": 2,
+                "HARDWARE": 3,
+            }
+
+        self.trigger_combo = QComboBox()
+        self.trigger_combo.addItems(list(self.trigger_modes.keys()))
+        # default to external (hardware) trigger
+        if "HARDWARE" in self.trigger_modes:
+            self.trigger_combo.setCurrentText("HARDWARE")
+        self.trigger_btn = QPushButton("トリガー設定")
+        self.trigger_btn.clicked.connect(self.change_trigger_mode)
+        trigger_h = QHBoxLayout()
+        trigger_h.addWidget(QLabel("Trigger:"))
+        trigger_h.addWidget(self.trigger_combo)
+        trigger_h.addWidget(self.trigger_btn)
+
         # --- グラフ ---
         self.figure = Figure()
         self.canvas = FigureCanvas(self.figure)
@@ -90,6 +127,7 @@ class SimpleUSB4000GUI(QWidget):
         vbox.addLayout(btnrow)
         vbox.addLayout(xrange_h)
         vbox.addLayout(yrange_h)
+        vbox.addLayout(trigger_h)
         vbox.addWidget(self.toolbar)
         vbox.addWidget(self.canvas)
         vbox.addWidget(self.status_label)
@@ -101,6 +139,8 @@ class SimpleUSB4000GUI(QWidget):
             self.spectrometer = Spectrometer.from_first_available()
             self.status_label.setText("ステータス: 接続済み")
             self.log_box.append("分光器接続完了")
+            # apply selected trigger mode (default is external)
+            self.change_trigger_mode()
         except Exception as e:
             self.status_label.setText("ステータス: 接続失敗")
             self.log_box.append(f"接続エラー: {e}")
@@ -112,6 +152,18 @@ class SimpleUSB4000GUI(QWidget):
         self.dark_spectrum = self.spectrometer.intensities()
         self.log_box.append("ダークスペクトルを更新しました")
         self.status_label.setText("ステータス: ダーク更新完了")
+
+    def change_trigger_mode(self):
+        if not self.spectrometer:
+            self.log_box.append("分光器が接続されていません")
+            return
+        mode_name = self.trigger_combo.currentText()
+        mode_value = self.trigger_modes.get(mode_name, 0)
+        try:
+            self.spectrometer.trigger_mode(mode_value)
+            self.log_box.append(f"トリガーモードを{mode_name}に設定しました")
+        except Exception as e:
+            self.log_box.append(f"トリガーモード設定失敗: {e}")
 
     def toggle_auto(self):
         if self.start_btn.isChecked():
