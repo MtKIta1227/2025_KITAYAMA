@@ -569,3 +569,4 @@ if __name__ == "__main__":
     window = DataGraphApp()
     window.show()
     sys.exit(app.exec_())
+/Users/daisuke/Library/Mobile Documents/com~apple~CloudDocs/labo/Github_macbook/KITAYAMA_TAS/_TEST/USB4000.py
