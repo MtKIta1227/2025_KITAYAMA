@@ -99,6 +99,9 @@ class SimpleUSB4000GUI(QWidget):
 
         self.trigger_combo = QComboBox()
         self.trigger_combo.addItems(list(self.trigger_modes.keys()))
+        # default to external (hardware) trigger
+        if "HARDWARE" in self.trigger_modes:
+            self.trigger_combo.setCurrentText("HARDWARE")
         self.trigger_btn = QPushButton("トリガー設定")
         self.trigger_btn.clicked.connect(self.change_trigger_mode)
         trigger_h = QHBoxLayout()
@@ -136,6 +139,8 @@ class SimpleUSB4000GUI(QWidget):
             self.spectrometer = Spectrometer.from_first_available()
             self.status_label.setText("ステータス: 接続済み")
             self.log_box.append("分光器接続完了")
+            # apply selected trigger mode (default is external)
+            self.change_trigger_mode()
         except Exception as e:
             self.status_label.setText("ステータス: 接続失敗")
             self.log_box.append(f"接続エラー: {e}")
