@@ -61,7 +61,7 @@ class PlotWindow(QMainWindow):
             ax2.legend(loc='upper right')
             self.figure.tight_layout()
             self.canvas.draw()
-            self.label.setText(f'Loading Successfull!: {filepath}')
+            self.label.setText(f'Loading Successful!: {filepath}')
         except Exception as e:
             self.label.setText(f'Error: {str(e)}')
 
