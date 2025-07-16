@@ -1,0 +1,9 @@
+▼ Pump ON / OFF ΔA ＆ Timing レポート
+--------------------------------------------
+ショット数 (各状態) : 1000
+積分時間            : 100.000 ms
+Δt 平均 ±SD (OFF)  : +0.5553 ± 0.7794 ms
+Δt 平均 ±SD (ON)   : +0.3662 ± 0.4451 ms
+Spectrometer Ref   : FLMT09046
+Spectrometer Probe : FLMT01771
+保存先             : /Users/daisuke/Library/Mobile Documents/com~apple~CloudDocs/labo/Github_macbook/2025_KITAYAMA/raw_data/20250626_064053_906635Z
