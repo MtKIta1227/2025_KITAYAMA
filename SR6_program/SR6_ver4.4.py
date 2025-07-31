@@ -1,6 +1,8 @@
 import sys
 import csv
+import re
 from pathlib import Path
+from datetime import datetime
 from oceandirect.OceanDirectAPI import OceanDirectAPI, OceanDirectError
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -8,16 +10,26 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem, QFileDialog, QMenu, QAbstractItemView
 )
 from PyQt6.QtGui import QAction
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 import pyqtgraph as pg
 import itertools
 
+class TimestampSortTreeWidgetItem(QTreeWidgetItem):
+    """アイテムに保存されたタイムスタンプを基準にソートするカスタムクラス"""
+    def __lt__(self, other):
+        ts1 = self.data(0, Qt.ItemDataRole.UserRole)
+        ts2 = other.data(0, Qt.ItemDataRole.UserRole)
+
+        if ts1 and ts2:
+            return ts1 < ts2
+        return super().__lt__(other)
+
 class OceanDirectApp(QMainWindow):
-    """OceanDirect 分光測定 GUI（改良版グループ化・解除機能付き）"""
+    """OceanDirect 分光測定 GUI（オフライン編集対応）"""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("OceanDirect 測定プログラム (ボタン操作版)")
+        self.setWindowTitle("OceanDirect 測定プログラム (オフライン編集対応)")
         self.resize(1100, 650)
         self.od = None
         self.spectrometer = None
@@ -25,7 +37,7 @@ class OceanDirectApp(QMainWindow):
         self.dark_spectrum: list[float] | None = None
         self.wavelengths: list[float] = []
         
-        self.spectra_data: dict[str, tuple[str, list]] = {}
+        self.spectra_data: dict[str, tuple] = {}
         
         self.spectrum_counter = 1
         self.group_counter = 1
@@ -40,6 +52,16 @@ class OceanDirectApp(QMainWindow):
         self.update_ui_state(False)
 
     def _build_ui(self):
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("ファイル")
+        load_action = QAction("CSVから読み込み", self)
+        load_action.triggered.connect(self.load_data_from_csv)
+        file_menu.addAction(load_action)
+        
+        save_action = QAction("名前を付けて保存", self)
+        save_action.triggered.connect(self.save_data_as)
+        file_menu.addAction(save_action)
+
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
@@ -72,8 +94,8 @@ class OceanDirectApp(QMainWindow):
 
         self.plot_widget = pg.PlotWidget(background='w')
         self.plot_widget.addLegend()
-        self.plot_widget.setLabel('left', 'Intensity', units='counts')
-        self.plot_widget.setLabel('bottom', 'Wavelength', units='nm')
+        self.plot_widget.setLabel('left', 'Intensity (a.u.)')
+        self.plot_widget.setLabel('bottom', 'Wavelength / nm')
         self.plot_widget.showGrid(x=True, y=True)
         left_layout.addWidget(self.plot_widget, 1)
 
@@ -85,6 +107,8 @@ class OceanDirectApp(QMainWindow):
         self.data_list.setHeaderLabels(["測定データ"])
         self.data_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.data_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.data_list.setSortingEnabled(True)
+        self.data_list.sortItems(0, Qt.SortOrder.AscendingOrder)
         right_layout.addWidget(self.data_list)
 
         self.status_bar = QStatusBar(); self.setStatusBar(self.status_bar)
@@ -95,6 +119,8 @@ class OceanDirectApp(QMainWindow):
         self.data_list.itemClicked.connect(self.on_item_clicked)
         self.data_list.customContextMenuRequested.connect(self.show_context_menu)
         self.toggle_group_button.clicked.connect(self.toggle_group_action)
+        self.data_list.itemDoubleClicked.connect(self.edit_item_name)
+        self.data_list.itemChanged.connect(self.update_item_name)
 
     def initialize_api_and_devices(self):
         try:
@@ -139,9 +165,11 @@ class OceanDirectApp(QMainWindow):
 
     def update_ui_state(self, connected: bool):
         self.device_combo.setEnabled(not connected)
-        for w in [self.acquire_button, self.acquire_dark_button, self.integration_time_input,
-                  self.toggle_group_button]:
+        # --- 変更点: 装置接続に依存するウィジェットのみ有効/無効を切り替える ---
+        for w in [self.acquire_button, self.acquire_dark_button, self.integration_time_input]:
             w.setEnabled(connected)
+        # グループ化ボタンは常に有効のまま
+        # --- 変更ここまで ---
         self.connect_button.setText("切断" if connected else "接続")
         if not connected:
             self.plot_widget.clear()
@@ -160,9 +188,14 @@ class OceanDirectApp(QMainWindow):
             label = f"Spe_{self.spectrum_counter}"
             self.spectrum_counter += 1
             
-            self.spectra_data[label] = ('spectrum', data)
-            item = QTreeWidgetItem([label])
+            timestamp = datetime.now()
+            self.spectra_data[label] = ('spectrum', data, timestamp)
+            item = TimestampSortTreeWidgetItem([label])
+            item.setData(0, Qt.ItemDataRole.UserRole, timestamp)
+            
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
             self.data_list.addTopLevelItem(item)
+            self.data_list.sortItems(0, Qt.SortOrder.AscendingOrder)
             self.data_list.clearSelection()
             self.data_list.setCurrentItem(item)
             self.on_item_clicked(item)
@@ -186,7 +219,6 @@ class OceanDirectApp(QMainWindow):
             self.status_bar.showMessage(f"ダーク取得エラー: {e}")
 
     def on_item_clicked(self, item: QTreeWidgetItem):
-        # 複数選択時はグラフをクリアするだけ
         if len(self.data_list.selectedItems()) > 1:
             self.plot_widget.clear()
             self.status_bar.showMessage(f"{len(self.data_list.selectedItems())}個のアイテムを選択中", 2000)
@@ -197,9 +229,9 @@ class OceanDirectApp(QMainWindow):
 
         if item.parent() is None and item.childCount() > 0:
             label = item.text(0)
-            item_type, data = self.spectra_data.get(label, (None, None))
+            item_type, data, _ = self.spectra_data.get(label, (None, None, None))
             if item_type == 'group':
-                for spec_label, spec_data in data:
+                for spec_label, spec_data, _ in data:
                     color = next(self.plot_colors)
                     self.plot_widget.plot(self.wavelengths, spec_data, pen=pg.mkPen(color=color), name=spec_label)
                 self.status_bar.showMessage(f"グループ '{label}' を重ね書き表示中", 2000)
@@ -209,42 +241,41 @@ class OceanDirectApp(QMainWindow):
             data = None
             if item.parent():
                 g_label = item.parent().text(0)
-                _, group_data = self.spectra_data.get(g_label, (None, []))
-                data = next((d for l, d in group_data if l == label), None)
+                _, group_data, _ = self.spectra_data.get(g_label, (None, [], None))
+                data = next((d for l, d, _ in group_data if l == label), None)
             else:
-                _, data = self.spectra_data.get(label, (None, None))
+                _, data, _ = self.spectra_data.get(label, (None, None, None))
             
             if data:
                 self.plot_widget.plot(self.wavelengths, data, pen='b', name=label)
                 self.status_bar.showMessage(f"'{label}' を単独表示中", 2000)
 
-    # --- 変更点: ボタンの動作を振り分けるロジックを更新 ---
     def toggle_group_action(self):
-        """選択状態に応じてグループ化または部分的なグループ解除を行う"""
         selected_items = self.data_list.selectedItems()
         if not selected_items:
             self.status_bar.showMessage("リストからアイテムを選択してください", 3000)
             return
 
-        # --- 解除のロジック ---
-        # 選択アイテムが全て「同じ親を持つ子アイテム」かチェック
-        parent = selected_items[0].parent()
-        if parent is not None:
-            if all(item.parent() == parent for item in selected_items):
+        first_item_parent = selected_items[0].parent()
+        if first_item_parent is not None:
+            if all(item.parent() == first_item_parent for item in selected_items):
                 self.remove_items_from_group(selected_items)
                 return
-
-        # --- グループ化のロジック ---
-        # 選択アイテムが全て「トップレベルの単独アイテム」かチェック
-        are_all_spectra = all(item.parent() is None and item.childCount() == 0 for item in selected_items)
-        if len(selected_items) > 1 and are_all_spectra:
-            self.group_selected_spectra(selected_items)
-            return
+            else:
+                self.status_bar.showMessage("グループ解除は同じグループ内のアイテムでのみ行えます。", 3000)
+                return
+        
+        if len(selected_items) > 1:
+            if all(item.childCount() == 0 for item in selected_items):
+                 self.group_selected_spectra(selected_items)
+                 return
+            else:
+                 self.status_bar.showMessage("グループを含むアイテムを再度グループ化することはできません。", 3000)
+                 return
 
         self.status_bar.showMessage("無効な選択です。グループ化(単独アイテム複数選択)または解除(グループ内アイテム選択)を行ってください。", 4000)
     
     def group_selected_spectra(self, selected_items: list[QTreeWidgetItem]):
-        """渡されたアイテムのリストを新しいグループにまとめる"""
         new_gname = f"Group{self.group_counter}"
         self.group_counter += 1
         
@@ -252,56 +283,52 @@ class OceanDirectApp(QMainWindow):
         for item in selected_items:
             label = item.text(0)
             if label in self.spectra_data:
-                _, data = self.spectra_data.pop(label)
-                new_group_data.append((label, data))
+                _, data, timestamp = self.spectra_data.pop(label)
+                new_group_data.append((label, data, timestamp))
         
-        self.spectra_data[new_gname] = ('group', new_group_data)
+        timestamp = datetime.now()
+        self.spectra_data[new_gname] = ('group', new_group_data, timestamp)
 
-        new_group_item = QTreeWidgetItem([new_gname])
+        new_group_item = TimestampSortTreeWidgetItem([new_gname])
+        new_group_item.setData(0, Qt.ItemDataRole.UserRole, timestamp)
+        new_group_item.setFlags(new_group_item.flags() | Qt.ItemFlag.ItemIsEditable)
         self.data_list.addTopLevelItem(new_group_item)
         
         for item in selected_items:
             (item.parent() or self.data_list.invisibleRootItem()).removeChild(item)
             new_group_item.addChild(item)
 
+        self.data_list.sortItems(0, Qt.SortOrder.AscendingOrder)
         new_group_item.setExpanded(True)
         self.data_list.clearSelection()
         self.data_list.setCurrentItem(new_group_item)
         self.on_item_clicked(new_group_item)
         self.status_bar.showMessage(f"'{new_gname}' を作成しました", 3000)
 
-    # --- 変更点: 部分的なグループ解除を行うメソッドを新設 ---
     def remove_items_from_group(self, items_to_remove: list[QTreeWidgetItem]):
-        """選択されたアイテムを現在のグループから解除する"""
         parent_item = items_to_remove[0].parent()
         if not parent_item: return
         
         g_label = parent_item.text(0)
-        
-        # データ構造を更新
-        group_data_list = self.spectra_data[g_label][1]
-        
+        _, group_data_list, _ = self.spectra_data[g_label]
         labels_to_remove = {item.text(0) for item in items_to_remove}
         new_group_list = []
         
-        for spec_label, spec_data in group_data_list:
+        for spec_label, spec_data, spec_ts in group_data_list:
             if spec_label in labels_to_remove:
-                # 解除するアイテムをトップレベルのデータとして復活させる
-                self.spectra_data[spec_label] = ('spectrum', spec_data)
+                self.spectra_data[spec_label] = ('spectrum', spec_data, spec_ts)
             else:
-                new_group_list.append((spec_label, spec_data))
+                new_group_list.append((spec_label, spec_data, spec_ts))
         
-        # グループのデータを更新
-        self.spectra_data[g_label] = ('group', new_group_list)
+        self.spectra_data[g_label] = ('group', new_group_list, self.spectra_data[g_label][2])
         
-        # GUIを更新
         for item in items_to_remove:
             parent_item.removeChild(item)
             self.data_list.addTopLevelItem(item)
             
         self.data_list.clearSelection()
+        self.data_list.sortItems(0, Qt.SortOrder.AscendingOrder)
         
-        # もしグループに残ったアイテムが1つ以下なら、グループを自動解散させる
         if parent_item.childCount() <= 1:
             self.dissolve_group(parent_item)
             self.status_bar.showMessage("アイテムをグループ解除し、残りのアイテムが少ないためグループを解散しました", 4000)
@@ -309,15 +336,14 @@ class OceanDirectApp(QMainWindow):
             self.status_bar.showMessage(f"{len(items_to_remove)}個のアイテムをグループ解除しました", 3000)
             
     def dissolve_group(self, group_item: QTreeWidgetItem):
-        """指定されたグループを完全に解散し、中の全アイテムをトップレベルに戻す"""
-        if not (group_item.parent() is None and group_item.childCount() > 0):
-             return # グループでないなら何もしない
+        if group_item.parent() is not None:
+             return
 
         g_label = group_item.text(0)
-        _, group_data = self.spectra_data.pop(g_label, (None, []))
-
-        for label, data in group_data:
-            self.spectra_data[label] = ('spectrum', data)
+        if g_label in self.spectra_data:
+            _, group_data, _ = self.spectra_data.pop(g_label)
+            for label, data, timestamp in group_data:
+                self.spectra_data[label] = ('spectrum', data, timestamp)
         
         children_to_move = []
         while group_item.childCount() > 0:
@@ -330,7 +356,41 @@ class OceanDirectApp(QMainWindow):
         if idx != -1:
             self.data_list.takeTopLevelItem(idx)
         
+        self.data_list.sortItems(0, Qt.SortOrder.AscendingOrder)
         self.plot_widget.clear()
+
+    def edit_item_name(self, item: QTreeWidgetItem, column: int):
+        item.setData(0, Qt.ItemDataRole.UserRole + 1, item.text(0))
+        QTimer.singleShot(0, lambda: self.data_list.editItem(item, column))
+
+    def update_item_name(self, item: QTreeWidgetItem, column: int):
+        old_name = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        new_name = item.text(0)
+
+        if not new_name or old_name is None or old_name == new_name:
+            item.setText(0, old_name or new_name)
+            return
+
+        if new_name in self.spectra_data:
+            self.status_bar.showMessage(f"エラー: '{new_name}' は既に存在します", 3000)
+            item.setText(0, old_name)
+            return
+
+        item_type, data, timestamp = self.spectra_data.pop(old_name)
+        self.spectra_data[new_name] = (item_type, data, timestamp)
+        
+        if item.parent():
+            parent = item.parent()
+            g_label = parent.text(0)
+            if g_label in self.spectra_data and self.spectra_data[g_label][0] == 'group':
+                group_list = self.spectra_data[g_label][1]
+                for i, (lbl, spec_data, spec_ts) in enumerate(group_list):
+                    if lbl == old_name:
+                        group_list[i] = (new_name, spec_data, spec_ts)
+                        break
+        
+        self.status_bar.showMessage(f"'{old_name}' を '{new_name}' に変更しました", 3000)
+        self.on_item_clicked(item)
 
     def show_context_menu(self, pos):
         if len(self.data_list.selectedItems()) > 1: return
@@ -339,65 +399,135 @@ class OceanDirectApp(QMainWindow):
         if not item: return
         
         menu = QMenu(self)
-        is_group = item.parent() is None and item.childCount() > 0
-        
         delete_act = QAction("削除", self, triggered=lambda: self.delete_item(item))
         menu.addAction(delete_act)
-
-        if is_group:
-            save_act = QAction("グループをフォルダに保存", self, triggered=lambda: self.save_group(item))
-            menu.addAction(save_act)
-        elif item.parent() is None:
-            save_act = QAction("スペクトルをCSV保存", self, triggered=lambda: self.save_spectrum(item))
-            menu.addAction(save_act)
             
         menu.exec(self.data_list.viewport().mapToGlobal(pos))
 
     def delete_item(self, item: QTreeWidgetItem):
         if item.parent() is None and item.childCount() > 0:
-            self.dissolve_group(item) # グループ削除時はまず解散させる
+            g_label = item.text(0)
+            if g_label in self.spectra_data:
+                _, group_data, _ = self.spectra_data.pop(g_label)
+                for spec_label, _, _ in group_data:
+                    self.spectra_data.pop(spec_label, None)
         elif item.parent():
-            # 複数選択での部分解除に任せるため、単一の子アイテムの削除は実装しない
-            self.status_bar.showMessage("グループ内アイテムを削除するには、グループ解除機能を使ってください", 4000)
-            return
+            parent_item = item.parent()
+            g_label = parent_item.text(0)
+            spec_label = item.text(0)
+            if g_label in self.spectra_data and self.spectra_data[g_label][0] == 'group':
+                group_data = self.spectra_data[g_label][1]
+                self.spectra_data[g_label] = ('group', [d for d in group_data if d[0] != spec_label], self.spectra_data[g_label][2])
+            self.spectra_data.pop(spec_label, None)
         else:
             label = item.text(0)
             self.spectra_data.pop(label, None)
-            (item.parent() or self.data_list.invisibleRootItem()).removeChild(item)
+        
+        (item.parent() or self.data_list.invisibleRootItem()).removeChild(item)
 
         self.plot_widget.clear()
         self.status_bar.showMessage("削除しました", 3000)
 
-    def save_group(self, item: QTreeWidgetItem):
-        gname = item.text(0)
-        _, data = self.spectra_data.get(gname, (None, None))
-        if not data: return
+    def save_data_as(self):
+        selected_items = self.data_list.selectedItems()
+        spectra_to_save = []
         
-        dir_path = QFileDialog.getExistingDirectory(self, "保存先フォルダを選択")
-        if not dir_path: return
+        if not selected_items:
+            iterator = QTreeWidgetItemIterator(self.data_list)
+            while iterator.value():
+                item = iterator.value()
+                label = item.text(0)
+                if item.parent() is not None:
+                    parent_label = item.parent().text(0)
+                    _, group_data, _ = self.spectra_data.get(parent_label, (None, [], None))
+                    data = next((d for l, d, _ in group_data if l == label), None)
+                    if data: spectra_to_save.append((label, data))
+                elif item.childCount() == 0:
+                    _, data, _ = self.spectra_data.get(label, (None, None, None))
+                    if data: spectra_to_save.append((label, data))
+                iterator += 1
+        
+        else:
+            for item in selected_items:
+                if item.parent() is None and item.childCount() > 0:
+                    g_label = item.text(0)
+                    _, group_data, _ = self.spectra_data.get(g_label, (None, [], None))
+                    for spec_label, spec_data, _ in group_data:
+                        spectra_to_save.append((spec_label, spec_data))
+                elif item.parent() is None:
+                    label = item.text(0)
+                    _, data, _ = self.spectra_data.get(label, (None, None, None))
+                    if data: spectra_to_save.append((label, data))
+
+        if not spectra_to_save:
+            self.status_bar.showMessage("保存対象のスペクトルデータがありません", 3000)
+            return
+
+        path, _ = QFileDialog.getSaveFileName(self, "名前を付けて保存", "", "CSV Files (*.csv)")
+        if not path:
+            return
+
+        self._write_spectra_to_csv(path, spectra_to_save)
+
+    def load_data_from_csv(self):
+        path, _ = QFileDialog.getOpenFileName(self, "CSVから読み込み", "", "CSV Files (*.csv)")
+        if not path:
+            return
             
-        for lbl, spec_data in data:
-            self._write_csv(Path(dir_path) / f"{gname}_{lbl}.csv", spec_data)
-        self.status_bar.showMessage(f"グループ '{gname}' を保存しました", 5000)
-
-    def save_spectrum(self, item: QTreeWidgetItem):
-        label = item.text(0)
-        _, data = self.spectra_data.get(label, (None, None))
-        if data is None: return
-        
-        path, _ = QFileDialog.getSaveFileName(self, "CSV 保存", f"{label}.csv", "CSV Files (*.csv)")
-        if path:
-            self._write_csv(Path(path), data)
-            self.status_bar.showMessage(f"{label} を保存しました", 4000)
-
-    def _write_csv(self, path: Path, data: list[float]):
         try:
-            with path.open('w', newline='', encoding='utf-8') as f:
+            with open(path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                header = next(reader)
+                data_rows = [row for row in reader]
+
+            if not header or len(header) < 2 or not data_rows:
+                self.status_bar.showMessage("ファイルが空か、形式が不正です", 3000)
+                return
+
+            # 波長データがない場合はCSVから読み込む
+            if not self.wavelengths:
+                self.wavelengths = [float(row[0]) for row in data_rows]
+            
+            num_spectra_loaded = 0
+            for i in range(1, len(header)):
+                label = header[i]
+                original_label = label
+                count = 1
+                while label in self.spectra_data:
+                    label = f"{original_label}_imported_{count}"
+                    count += 1
+                
+                data = [float(row[i]) for row in data_rows]
+                
+                timestamp = datetime.now()
+                self.spectra_data[label] = ('spectrum', data, timestamp)
+                item = TimestampSortTreeWidgetItem([label])
+                item.setData(0, Qt.ItemDataRole.UserRole, timestamp)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                self.data_list.addTopLevelItem(item)
+                num_spectra_loaded += 1
+            
+            self.data_list.sortItems(0, Qt.SortOrder.AscendingOrder)
+            self.status_bar.showMessage(f"{num_spectra_loaded}個のスペクトルを読み込みました", 4000)
+
+        except (ValueError, IndexError, FileNotFoundError) as e:
+            self.status_bar.showMessage(f"ファイルの読み込みエラー: {e}", 5000)
+
+    def _write_spectra_to_csv(self, path, spectra_to_save):
+        if not self.wavelengths: return
+        try:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(["wavelength[nm]", "intensity[counts]"])
-                writer.writerows(zip(self.wavelengths, data))
+                header = [self.plot_widget.getAxis('bottom').labelText] + [label for label, _ in spectra_to_save]
+                writer.writerow(header)
+
+                for i, wl in enumerate(self.wavelengths):
+                    row = [wl] + [data[i] for _, data in spectra_to_save]
+                    writer.writerow(row)
+            
+            self.status_bar.showMessage(f"データを '{Path(path).name}' に保存しました", 4000)
         except OSError as e:
-            self.status_bar.showMessage(f"保存エラー: {e}")
+            self.status_bar.showMessage(f"保存エラー: {e}", 5000)
 
     def closeEvent(self, event):
         if self.spectrometer:
@@ -409,6 +539,7 @@ class OceanDirectApp(QMainWindow):
         event.accept()
 
 if __name__ == "__main__":
+    from PyQt6.QtWidgets import QTreeWidgetItemIterator
     app = QApplication(sys.argv)
     win = OceanDirectApp(); win.show()
     sys.exit(app.exec())
